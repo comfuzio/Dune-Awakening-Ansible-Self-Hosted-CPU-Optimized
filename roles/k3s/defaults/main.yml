@@ -1,0 +1,23 @@
+---
+k3s_channel: stable
+# Exact release (e.g. "v1.xx.y+k3s1"); overrides the channel when set.
+k3s_version: ""
+k3s_installer_url: https://get.k3s.io
+
+# Ubuntu 26.04 kernels >= 7.0.0-42 label container peers as
+# "cri-containerd.apparmor.d//&unconfined", which containerd's default
+# profile refuses to signal. Postgres (SIGUSR1) and every Go service
+# (SIGURG preemption) then break. Running containers unconfined avoids it.
+k3s_disable_apparmor: true
+
+# Upstream DNS for pods. A dedicated resolv.conf keeps search domains that
+# Proxmox/cloud-init inject on the host out of cluster DNS.
+k3s_pod_nameservers: "{{ vm_dns | default(['1.1.1.1', '1.0.0.1']) }}"
+
+# Funcom's images are imported from the payload and cannot be pulled again
+# from a registry, so the kubelet should only garbage-collect them when the
+# disk is nearly full.
+k3s_image_gc_high: 95
+k3s_image_gc_low: 90
+
+k3s_extra_config: {}

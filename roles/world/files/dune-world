@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Reconcile a Funcom battlegroup ("world") with this host's settings.
+
+  dune-world namespace
+      Print the battlegroup namespace (funcom-seabass-*). Empty if none.
+  dune-world files --ip IP [--host-id ID] [--drop-scheduler] FILE...
+      Set HOST_DATACENTER_* env values in YAML files in place (line based, so
+      Funcom's formatting and comments survive). Optionally drop references
+      to Funcom's custom scheduler, which only exists on their VM image.
+  dune-world settings --ip IP
+      Put the player-facing address on line 4 of ~/.dune/settings.conf.
+  dune-world cr --ns NS --ip IP --host-id ID --title TITLE
+      Patch the live BattleGroup resource to match.
+  dune-world fls --ns NS FILE
+      Write the ServiceAuthKey from the self-host token (environment variable
+      DUNE_SELFHOST_TOKEN) into the gateway secret manifest and live secret.
+  dune-world wait --ns NS [--timeout SECONDS] [--servers N]
+      Block until the battlegroup is healthy and N game servers are ready.
+
+Prints CHANGED when something was modified. Standard library only.
+"""
+import argparse
+import base64
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import time
+
+NS_PREFIX = "funcom-seabass-"
+SCHEDULER = "memory-focused-scheduler"
+ENV_IP = "HOST_DATACENTER_IP_ADDRESS"
+ENV_ID = "HOST_DATACENTER_ID"
+
+
+def kubectl(*args, stdin=None, check=True):
+    proc = subprocess.run(["kubectl", *args], input=stdin, capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        sys.exit(f"kubectl {' '.join(args[:3])}... failed: {proc.stderr.strip()}")
+    return proc
+
+
+def kjson(*args):
+    return json.loads(kubectl(*args, "-o", "json").stdout)
+
+
+def bg_name(ns):
+    return ns[len(NS_PREFIX):]
+
+
+# ---------------------------------------------------------------- files ---
+
+NAME_RE = re.compile(r"""\bname:\s*["']?([A-Z0-9_]+)["']?\s*$""")
+VALUE_RE = re.compile(r"""^(\s*(?:-\s+)?)value:.*?(\r?\n)?$""")
+SCHED_RE = re.compile(r"^\s*schedulerName:\s*[\"']?" + SCHEDULER + r"[\"']?\s*$")
+
+
+def edit_text(text, env, drop_scheduler):
+    out, pending, edits = [], None, 0
+    for line in text.splitlines(keepends=True):
+        if drop_scheduler and SCHED_RE.match(line):
+            edits += 1
+            continue
+        hit = NAME_RE.search(line)
+        if hit and hit.group(1) in env:
+            pending = hit.group(1)
+            out.append(line)
+            continue
+        if pending:
+            value = VALUE_RE.match(line)
+            if value:
+                new = f'{value.group(1)}value: "{env[pending]}"{value.group(2) or ""}'
+                if new != line:
+                    line, edits = new, edits + 1
+                pending = None
+            elif line.lstrip().startswith("- "):
+                pending = None  # next list item: this env var had no value line
+        out.append(line)
+    return "".join(out), edits
+
+
+def cmd_files(args):
+    env = {ENV_IP: args.ip}
+    if args.host_id:
+        env[ENV_ID] = args.host_id
+    changed = False
+    for name in args.file:
+        path = pathlib.Path(name)
+        if not path.exists():
+            print(f"missing  {path}")
+            continue
+        original = path.read_text(encoding="utf-8")
+        updated, edits = edit_text(original, env, args.drop_scheduler)
+        if edits:
+            backup = path.with_name(path.name + ".orig")
+            if not backup.exists():
+                backup.write_text(original, encoding="utf-8")
+            path.write_text(updated, encoding="utf-8")
+            print(f"edited   {path} ({edits})")
+            changed = True
+    if changed:
+        print("CHANGED")
+
+
+def cmd_settings(args):
+    path = pathlib.Path.home() / ".dune" / "settings.conf"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    lines += [""] * (4 - len(lines))
+    if lines[3] != args.ip:
+        lines[3] = args.ip
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print("CHANGED")
+
+
+# ------------------------------------------------------------ resources ---
+
+def ptr(parts):
+    return "/" + "/".join(str(p).replace("~", "~0").replace("/", "~1") for p in parts)
+
+
+def cr_ops(node, path, env):
+    ops = []
+    if isinstance(node, dict):
+        if node.get("schedulerName") == SCHEDULER:
+            ops.append({"op": "remove", "path": ptr(path + ["schedulerName"])})
+        for key in ("envVars", "env"):
+            items = node.get(key)
+            if not isinstance(items, list):
+                continue
+            for i, item in enumerate(items):
+                want = env.get(item.get("name")) if isinstance(item, dict) else None
+                if want is not None and item.get("value") != want:
+                    op = "replace" if "value" in item else "add"
+                    ops.append({"op": op, "path": ptr(path + [key, i, "value"]), "value": want})
+        for key, child in node.items():
+            ops += cr_ops(child, path + [key], env)
+    elif isinstance(node, list):
+        for i, child in enumerate(node):
+            ops += cr_ops(child, path + [i], env)
+    return ops
+
+
+def cmd_cr(args):
+    bg = bg_name(args.ns)
+    obj = kjson("get", "battlegroup", bg, "-n", args.ns)
+    spec = obj.get("spec", {})
+    ops = cr_ops(spec, ["spec"], {ENV_IP: args.ip, ENV_ID: args.host_id})
+    if spec.get("title") != args.title:
+        ops.append({"op": "replace" if "title" in spec else "add",
+                    "path": "/spec/title", "value": args.title})
+    if ops:
+        kubectl("patch", "battlegroup", bg, "-n", args.ns, "--type=json", "-p", json.dumps(ops))
+        print(f"patched  battlegroup/{bg} ({len(ops)} ops)")
+        print("CHANGED")
+
+
+def service_auth_key():
+    token = os.environ.get("DUNE_SELFHOST_TOKEN", "").strip()
+    if token.count(".") != 2:
+        sys.exit("DUNE_SELFHOST_TOKEN is missing or is not a JWT")
+    body = token.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    key = claims.get("ServiceAuthKey")
+    if not key:
+        sys.exit("the self-host token has no ServiceAuthKey claim")
+    return key
+
+
+def cmd_fls(args):
+    key = service_auth_key()
+    changed = False
+    path = pathlib.Path(args.file)
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        new = re.sub(r'(?m)^(\s*fls-apikey:).*$', lambda m: f'{m.group(1)} "{key}"', text)
+        if new != text:
+            path.write_text(new, encoding="utf-8")
+            changed = True
+    live = kubectl("get", "secret", "server-gateway-secret", "-n", args.ns, "-o", "json", check=False)
+    if live.returncode == 0:
+        current = json.loads(live.stdout).get("data", {}).get("fls-apikey", "")
+        if base64.b64decode(current or "").decode() != key:
+            kubectl("patch", "secret", "server-gateway-secret", "-n", args.ns, "--type=merge",
+                    "-p", json.dumps({"stringData": {"fls-apikey": key}}))
+            changed = True
+    if changed:
+        print("CHANGED")
+
+
+# -------------------------------------------------------------- queries ---
+
+def cmd_namespace(_args):
+    names = [i["metadata"]["name"] for i in kjson("get", "namespaces")["items"]]
+    worlds = sorted(n for n in names if n.startswith(NS_PREFIX))
+    if len(worlds) > 1:
+        sys.exit("more than one battlegroup namespace: " + ", ".join(worlds) +
+                 " (set dune_world_namespace)")
+    print(worlds[0] if worlds else "")
+
+
+def ready_servers(ns):
+    proc = kubectl("get", "serverstats", "-n", ns, "--no-headers", check=False)
+    return sum(1 for row in proc.stdout.splitlines()
+               if "Running" in row.split() and "true" in row.split())
+
+
+def cmd_wait(args):
+    bg = bg_name(args.ns)
+    deadline = time.monotonic() + args.timeout
+    last = None
+    while True:
+        status = kjson("get", "battlegroup", bg, "-n", args.ns).get("status", {})
+        util = status.get("utilities", {})
+        state = {
+            "battlegroup": status.get("phase"),
+            "database": status.get("database", {}).get("phase"),
+            "gateway": util.get("serverGateway", {}).get("phase"),
+            "director": util.get("director", {}).get("phase"),
+            "servers": ready_servers(args.ns),
+        }
+        healthy = (state["battlegroup"] == "Healthy" and state["database"] == "Ready"
+                   and state["gateway"] == "Healthy" and state["director"] == "Healthy"
+                   and state["servers"] >= args.servers)
+        if state != last:
+            print(json.dumps(state), file=sys.stderr, flush=True)
+            last = state
+        if healthy:
+            print(json.dumps(state))
+            return
+        if time.monotonic() > deadline:
+            sys.exit("timed out waiting for the battlegroup: " + json.dumps(state))
+        time.sleep(10)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("namespace").set_defaults(func=cmd_namespace)
+
+    p = sub.add_parser("files")
+    p.add_argument("--ip", required=True)
+    p.add_argument("--host-id", default="")
+    p.add_argument("--drop-scheduler", action="store_true")
+    p.add_argument("file", nargs="+")
+    p.set_defaults(func=cmd_files)
+
+    p = sub.add_parser("settings")
+    p.add_argument("--ip", required=True)
+    p.set_defaults(func=cmd_settings)
+
+    p = sub.add_parser("cr")
+    p.add_argument("--ns", required=True)
+    p.add_argument("--ip", required=True)
+    p.add_argument("--host-id", required=True)
+    p.add_argument("--title", required=True)
+    p.set_defaults(func=cmd_cr)
+
+    p = sub.add_parser("fls")
+    p.add_argument("--ns", required=True)
+    p.add_argument("file")
+    p.set_defaults(func=cmd_fls)
+
+    p = sub.add_parser("wait")
+    p.add_argument("--ns", required=True)
+    p.add_argument("--timeout", type=int, default=900)
+    p.add_argument("--servers", type=int, default=2)
+    p.set_defaults(func=cmd_wait)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

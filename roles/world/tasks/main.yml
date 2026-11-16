@@ -1,0 +1,67 @@
+---
+- name: Install the world helper
+  ansible.builtin.copy:
+    src: dune-world
+    dest: /usr/local/bin/dune-world
+    mode: "0755"
+
+- name: Detect the public IPv4 address from the VM
+  when: dune_public_ip | length == 0
+  ansible.builtin.uri:
+    url: "{{ item }}"
+    return_content: true
+  loop: "{{ dune_ip_lookup_urls }}"
+  register: world_ip_lookup
+  failed_when: false
+  changed_when: false
+
+- name: Settle the player-facing address
+  ansible.builtin.set_fact:
+    world_ip: >-
+      {{ dune_public_ip if dune_public_ip | length > 0 else
+         (world_ip_lookup.results | selectattr('status', 'defined') | selectattr('status', 'eq', 200)
+          | map(attribute='content') | map('trim') | select('match', '^[0-9.]+$') | first | default('')) }}
+    world_region_number: "{{ dune_world_regions[dune_world_region | string] | default(dune_world_region) }}"
+
+- name: Check address and region
+  ansible.builtin.assert:
+    that:
+      - world_ip is match('^[0-9]{1,3}(\.[0-9]{1,3}){3}$')
+      - world_region_number | string in ['1', '2', '3', '4', '5']
+    fail_msg: >-
+      Could not settle the public IP ('{{ world_ip }}') or the region
+      ('{{ dune_world_region }}'). Set dune_public_ip / dune_world_region.
+    quiet: true
+
+- name: Look for an existing world
+  ansible.builtin.command: dune-world namespace
+  register: world_ns_before
+  changed_when: false
+  when: dune_world_namespace | length == 0
+
+- name: Create the world
+  when: (dune_world_namespace | length == 0) and (world_ns_before.stdout | length == 0)
+  ansible.builtin.include_tasks: create.yml
+
+- name: Find the world namespace
+  ansible.builtin.command: dune-world namespace
+  register: world_ns_after
+  changed_when: false
+  when: dune_world_namespace | length == 0
+
+- name: Remember the world namespace
+  ansible.builtin.set_fact:
+    world_ns: "{{ dune_world_namespace if dune_world_namespace | length > 0 else world_ns_after.stdout }}"
+
+- name: Remember the world name
+  ansible.builtin.set_fact:
+    world_bg: "{{ world_ns | regex_replace('^funcom-seabass-', '') }}"
+
+- name: Fail when no world exists
+  ansible.builtin.assert:
+    that: world_ns is match('^funcom-seabass-.+')
+    fail_msg: Funcom's world.sh did not create a funcom-seabass-* namespace.
+    quiet: true
+
+- name: Reconcile the world
+  ansible.builtin.include_tasks: reconcile.yml

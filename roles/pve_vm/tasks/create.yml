@@ -1,0 +1,92 @@
+---
+- name: Full-clone the template
+  ansible.builtin.command:
+    argv: [qm, clone, "{{ pve_template_vmid }}", "{{ vm_id }}", --name, "{{ vm_name }}", --full, "1", --storage, "{{ pve_storage }}"]
+  changed_when: true
+
+- name: Work out network queue count
+  ansible.builtin.set_fact:
+    pve_vm_queues: "{{ (vm_net_queues | int > 0) | ternary(vm_net_queues | int, [vm_cores | int, 8] | min) }}"
+
+# Dedicated, unshared RAM (no ballooning, no KSM merging), host CPU model so
+# the guest sees AVX2/v3, multiqueue virtio-net for UDP game traffic.
+- name: Apply CPU, memory and network settings
+  ansible.builtin.command:
+    argv: >-
+      {{
+        ['qm', 'set', vm_id | string,
+         '--cores', vm_cores | string, '--sockets', '1', '--cpu', 'host',
+         '--memory', (vm_memory_gib | int * 1024) | string, '--balloon', '0', '--allow-ksm', '0',
+         '--net0', 'virtio,bridge=' ~ pve_bridge ~ ',queues=' ~ pve_vm_queues,
+         '--tablet', '0', '--onboot', (vm_start_on_boot | bool) | ternary('1', '0'),
+         '--agent', 'enabled=1,fstrim_cloned_disks=1']
+        + ((vm_numa | bool) | ternary(['--numa', '1'], []))
+        + ((vm_hugepages | string | length > 0) | ternary(['--hugepages', vm_hugepages | string, '--keephugepages', '1'], []))
+        + ((vm_cpu_affinity | string | length > 0) | ternary(['--affinity', vm_cpu_affinity | string], []))
+      }}
+  changed_when: true
+
+- name: Read cloned VM configuration
+  ansible.builtin.command: qm config {{ vm_id }}
+  register: pve_clone_cfg
+  changed_when: false
+
+- name: Add an EFI vars disk when the template has none
+  when: pve_clone_cfg.stdout is not search('(?m)^efidisk0:')
+  ansible.builtin.command:
+    argv: [qm, set, "{{ vm_id }}", --efidisk0, "{{ pve_storage }}:0,efitype=4m,pre-enrolled-keys=0"]
+  changed_when: true
+
+- name: Find the boot disk volume
+  ansible.builtin.set_fact:
+    pve_boot_volume: "{{ (pve_clone_cfg.stdout_lines | select('match', '^scsi0: ') | first).split(' ', 1)[1].split(',')[0] }}"
+
+- name: Apply boot disk performance options
+  ansible.builtin.command:
+    argv: [qm, set, "{{ vm_id }}", --scsi0, "{{ pve_boot_volume }},{{ vm_disk_options }}"]
+  changed_when: true
+
+- name: Grow the boot disk
+  ansible.builtin.command:
+    argv: [qm, resize, "{{ vm_id }}", scsi0, "{{ vm_disk_gib }}G"]
+  changed_when: true
+
+- name: Stage the SSH public key on the node
+  ansible.builtin.copy:
+    src: "{{ vm_ssh_public_key | expanduser }}"
+    dest: /root/.dune-vm-{{ vm_id }}.pub
+    mode: "0600"
+
+- name: Configure cloud-init (user, key, static address, DNS)
+  ansible.builtin.command:
+    argv:
+      - qm
+      - set
+      - "{{ vm_id }}"
+      - --ciuser
+      - dune
+      - --sshkeys
+      - /root/.dune-vm-{{ vm_id }}.pub
+      - --ipconfig0
+      - "ip={{ vm_address }},gw={{ vm_gateway }}"
+      - --nameserver
+      - "{{ vm_dns | join(' ') }}"
+      - --ciupgrade
+      - "0"
+  changed_when: true
+
+- name: Remove the staged key
+  ansible.builtin.file:
+    path: /root/.dune-vm-{{ vm_id }}.pub
+    state: absent
+
+# A rebuilt VM at the same address has a new host key; forget the old one so
+# the guest play's accept-new policy can learn the new key.
+- name: Forget any previous host key for this address
+  delegate_to: localhost
+  become: false
+  ansible.builtin.command:
+    argv: [ssh-keygen, -R, "{{ vm_address.split('/')[0] }}", -f, "{{ '~/.ssh/known_hosts.dune' | expanduser }}"]
+  register: pve_vm_known_hosts
+  changed_when: "'updated' in pve_vm_known_hosts.stdout"
+  failed_when: false

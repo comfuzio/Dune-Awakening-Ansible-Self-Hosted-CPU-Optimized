@@ -1,0 +1,48 @@
+---
+guest_expected_release: "26.04"
+guest_full_upgrade: true
+# snapd is not used by anything here; dropping it saves RAM and wakeups.
+guest_remove_snapd: true
+
+guest_packages:
+  - ca-certificates
+  - curl
+  - jq
+  - tar
+  - unzip
+  - openssl
+  - python3
+  - qemu-guest-agent
+  - irqbalance
+  - htop
+  # 32-bit runtime needed by SteamCMD
+  - lib32gcc-s1
+  - lib32stdc++6
+
+# Kernel tuning for a UDP-heavy game host running k3s. Rendered into
+# /etc/sysctl.d/60-dune.conf; override or extend per key.
+guest_sysctl:
+  # Larger socket buffers so bursts of game packets are not dropped.
+  net.core.rmem_max: 33554432
+  net.core.wmem_max: 33554432
+  net.core.rmem_default: 1048576
+  net.core.wmem_default: 1048576
+  net.ipv4.udp_rmem_min: 16384
+  net.ipv4.udp_wmem_min: 16384
+  net.core.netdev_max_backlog: 16384
+  net.core.somaxconn: 8192
+  # BBR + fq for the TCP side (RabbitMQ game port, Steam/registry downloads).
+  net.core.default_qdisc: fq
+  net.ipv4.tcp_congestion_control: bbr
+  net.ipv4.tcp_fastopen: 3
+  net.ipv4.ip_local_port_range: "10240 65000"
+  # Unreal servers map a lot of memory regions.
+  vm.max_map_count: 1048576
+  vm.swappiness: 10
+  # kubelet, containerd and the operators watch many files.
+  fs.inotify.max_user_instances: 8192
+  fs.inotify.max_user_watches: 1048576
+  # Server workload, not a desktop: no per-session scheduler groups, and no
+  # NMI watchdog ticking inside a VM.
+  kernel.sched_autogroup_enabled: 0
+  kernel.nmi_watchdog: 0

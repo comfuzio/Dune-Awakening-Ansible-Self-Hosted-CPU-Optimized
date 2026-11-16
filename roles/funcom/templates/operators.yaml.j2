@@ -1,0 +1,123 @@
+# Managed by Ansible (roles/funcom). Applied with kubectl apply.
+# A self-signed cert-manager issuer provides each operator's webhook TLS.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: funcom-operators-selfsigned
+  namespace: {{ funcom_namespace }}
+spec:
+  selfSigned: {}
+{% for op in funcom_operators %}
+{%   set base = op.kind ~ 'operator' %}
+{%   set sa = base ~ '-controller-manager' %}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ sa }}
+  namespace: {{ funcom_namespace }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ base }}-webhook
+  namespace: {{ funcom_namespace }}
+spec:
+  secretName: {{ base }}-webhook-server-cert
+  duration: 87600h0m0s
+  issuerRef:
+    name: funcom-operators-selfsigned
+  dnsNames:
+    - {{ base }}-webhook-service.{{ funcom_namespace }}.svc
+    - {{ base }}-webhook-service.{{ funcom_namespace }}.svc.cluster.local
+    - {{ base }}-webhook.{{ funcom_namespace }}.svc
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ base }}-manager-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ base }}-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ sa }}
+    namespace: {{ funcom_namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ base }}-leader-election-role
+  namespace: {{ funcom_namespace }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ base }}-leader-election-rolebinding
+  namespace: {{ funcom_namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ base }}-leader-election-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ sa }}
+    namespace: {{ funcom_namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ sa }}
+  namespace: {{ funcom_namespace }}
+  labels:
+    control-plane: {{ op.kind }}-controller-manager
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      control-plane: {{ op.kind }}-controller-manager
+  template:
+    metadata:
+      labels:
+        control-plane: {{ op.kind }}-controller-manager
+    spec:
+      serviceAccountName: {{ sa }}
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: manager
+          image: {{ funcom_registry }}/{{ op.image }}:{{ funcom_operator_version }}
+          imagePullPolicy: IfNotPresent
+          command: [/app/operator]
+          args:
+            - --leader-elect
+            - --zap-devel=false
+            - --zap-log-level={{ funcom_log_level }}
+            - --zap-time-encoding=iso8601
+{%   for flag in op.flags %}
+            - {{ flag | to_json }}
+{%   endfor %}
+          ports:
+            - name: webhook-server
+              containerPort: 9443
+          volumeMounts:
+            - name: webhook-cert
+              mountPath: /tmp/k8s-webhook-server/serving-certs
+              readOnly: true
+      volumes:
+        - name: webhook-cert
+          secret:
+            secretName: {{ base }}-webhook-server-cert
+{% endfor %}

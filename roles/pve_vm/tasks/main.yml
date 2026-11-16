@@ -1,0 +1,48 @@
+---
+- name: Check VM sizing against the battlegroup minimums
+  ansible.builtin.assert:
+    that:
+      - vm_cores | int >= vm_min_cores
+      - vm_memory_gib | int >= vm_min_memory_gib
+      - vm_disk_gib | int >= vm_min_disk_gib
+    fail_msg: >-
+      Need at least {{ vm_min_cores }} cores, {{ vm_min_memory_gib }} GiB RAM
+      and {{ vm_min_disk_gib }} GiB disk.
+    quiet: true
+
+- name: Read Dune VMID configuration
+  ansible.builtin.command: qm config {{ vm_id }}
+  register: pve_vm_cfg
+  changed_when: false
+  failed_when: false
+
+# Re-running against a VM this project created is fine; anything else at that
+# VMID is left untouched.
+- name: Refuse to touch a foreign VM at this VMID
+  when: pve_vm_cfg.rc == 0
+  ansible.builtin.assert:
+    that: pve_vm_cfg.stdout is search('(?m)^name:\s*' ~ (vm_name | regex_escape) ~ '\s*$')
+    fail_msg: "VMID {{ vm_id }} already exists and is not '{{ vm_name }}'. Pick another vm_id."
+    quiet: true
+
+- name: Create and configure the VM
+  when: pve_vm_cfg.rc != 0
+  ansible.builtin.include_tasks: create.yml
+
+- name: Read VM power state
+  ansible.builtin.command: qm status {{ vm_id }}
+  register: pve_vm_status
+  changed_when: false
+
+- name: Start the VM
+  when: "'running' not in pve_vm_status.stdout"
+  ansible.builtin.command: qm start {{ vm_id }}
+  changed_when: true
+
+- name: Wait for SSH on the guest
+  delegate_to: localhost
+  ansible.builtin.wait_for:
+    host: "{{ vm_address.split('/')[0] }}"
+    port: 22
+    search_regex: OpenSSH
+    timeout: 600

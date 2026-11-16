@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Manage Funcom's image archives in k3s's containerd.
+
+  dune-images import DIR...         import every *.tar whose images are missing
+  dune-images refs ARCHIVE          print the image references an archive holds
+  dune-images retag PREFIX FROM TO  add tag TO to every PREFIX*:FROM image
+
+Prints CHANGED on stdout when anything was imported or tagged, so Ansible can
+report changes accurately. Only the Python standard library is used.
+"""
+import json
+import pathlib
+import subprocess
+import sys
+import tarfile
+import time
+
+CTR = ["k3s", "ctr", "--namespace", "k8s.io"]
+
+
+def run(args, retries=6, wait=10):
+    """Run a ctr command, retrying while containerd is still starting."""
+    for attempt in range(1, retries + 1):
+        proc = subprocess.run(CTR + args, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout
+        if attempt == retries:
+            sys.exit(f"ctr {' '.join(args)} failed: {proc.stderr.strip()}")
+        time.sleep(wait)
+    return ""
+
+
+def normalise(ref):
+    """Expand short Docker Hub names the way containerd stores them."""
+    first, _, rest = ref.partition("/")
+    if not rest:
+        return f"docker.io/library/{ref}"
+    if "." not in first and ":" not in first and first != "localhost":
+        return f"docker.io/{ref}"
+    return ref
+
+
+def archive_refs(path):
+    refs = []
+    with tarfile.open(path) as tar:
+        members = {m.name.lstrip("./"): m for m in tar.getmembers()}
+        if "manifest.json" in members:  # docker save layout
+            for entry in json.load(tar.extractfile(members["manifest.json"])):
+                refs.extend(entry.get("RepoTags") or [])
+        if not refs and "index.json" in members:  # OCI layout
+            index = json.load(tar.extractfile(members["index.json"]))
+            for manifest in index.get("manifests", []):
+                notes = manifest.get("annotations", {})
+                ref = notes.get("io.containerd.image.name") or notes.get(
+                    "org.opencontainers.image.ref.name", "")
+                if "/" in ref or ":" in ref:
+                    refs.append(ref)
+    return [normalise(r) for r in refs]
+
+
+def digests():
+    """Map every image reference in containerd to its manifest digest."""
+    table = {}
+    for line in run(["images", "list"]).splitlines()[1:]:
+        cols = line.split()
+        if len(cols) >= 3:
+            table[cols[0]] = cols[2]
+    return table
+
+
+def present():
+    return set(digests())
+
+
+def cmd_import(dirs):
+    have = present()
+    changed = False
+    for directory in dirs:
+        for archive in sorted(pathlib.Path(directory).glob("*.tar")):
+            refs = archive_refs(archive)
+            if refs and all(r in have for r in refs):
+                print(f"present  {archive.name}")
+                continue
+            print(f"import   {archive.name}", flush=True)
+            run(["images", "import", str(archive)], retries=4, wait=15)
+            changed = True
+    if changed:
+        print("CHANGED")
+
+
+def cmd_refs(archive):
+    for ref in archive_refs(archive):
+        print(ref)
+
+
+def cmd_retag(prefix, src_tag, dst_tag):
+    have = digests()
+    sources = sorted(r for r in have if r.startswith(prefix) and r.endswith(":" + src_tag))
+    if not sources:
+        sys.exit(f"no images match {prefix}*:{src_tag}")
+    changed = False
+    for ref in sources:
+        target = ref[: -len(src_tag)] + dst_tag
+        if have.get(target) == have[ref]:
+            print(f"current  {target}")
+            continue
+        run(["images", "tag", "--force", ref, target])
+        print(f"tagged   {target}")
+        changed = True
+    if changed:
+        print("CHANGED")
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[0] == "import":
+        cmd_import(argv[1:])
+    elif len(argv) == 2 and argv[0] == "refs":
+        cmd_refs(argv[1])
+    elif len(argv) == 4 and argv[0] == "retag":
+        cmd_retag(*argv[1:])
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

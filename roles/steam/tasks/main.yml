@@ -1,0 +1,35 @@
+---
+- name: Fetch the payload with SteamCMD
+  when: dune_payload_archive | length == 0
+  ansible.builtin.include_tasks: steamcmd.yml
+
+- name: Unpack the payload from an archive
+  when: dune_payload_archive | length > 0
+  ansible.builtin.include_tasks: archive.yml
+
+- name: Check the payload has Funcom's control scripts
+  ansible.builtin.stat:
+    path: "{{ dune_payload_dir }}/scripts/{{ item }}"
+  loop: [battlegroup.sh, setup/world.sh]
+  register: steam_scripts
+
+- name: Fail on an incomplete payload
+  ansible.builtin.assert:
+    that: steam_scripts.results | map(attribute='stat.exists') | min
+    fail_msg: "{{ dune_payload_dir }}/scripts is incomplete; the download did not finish."
+    quiet: true
+
+- name: Find payload shell scripts
+  ansible.builtin.find:
+    paths: "{{ dune_payload_dir }}/scripts"
+    patterns: "*.sh"
+    recurse: true
+  register: steam_shell_scripts
+
+- name: Make payload scripts executable
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: "0755"
+  loop: "{{ steam_shell_scripts.files }}"
+  loop_control:
+    label: "{{ item.path | basename }}"

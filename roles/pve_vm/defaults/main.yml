@@ -1,0 +1,20 @@
+---
+vm_id: 201
+vm_name: dune-server
+vm_cores: 6
+vm_memory_gib: 40
+vm_disk_gib: 110
+vm_dns: [1.1.1.1, 1.0.0.1]
+vm_start_on_boot: true
+
+# Funcom's documented floor; below this the battlegroup will not fit.
+vm_min_cores: 4
+vm_min_memory_gib: 24
+vm_min_disk_gib: 100
+
+# Performance options (empty / false = Proxmox default).
+vm_numa: false
+vm_hugepages: ""        # "2" or "1024" (MiB page size); host must reserve them
+vm_cpu_affinity: ""     # host CPU list, e.g. "2-7"
+vm_net_queues: 0        # 0 = one queue per vCPU, capped at 8
+vm_disk_options: iothread=1,ssd=1,discard=on,aio=io_uring,cache=none

@@ -1,0 +1,56 @@
+---
+- name: Create image cache directory
+  ansible.builtin.file:
+    path: "{{ pve_image_cache_dir }}"
+    state: directory
+    mode: "0755"
+
+# get_url verifies against Canonical's SHA256SUMS and re-downloads on mismatch.
+- name: Download and verify the Ubuntu 26.04 amd64v3 cloud image
+  ansible.builtin.get_url:
+    url: "{{ pve_image_base_url }}/{{ pve_image_file }}"
+    dest: "{{ pve_image_cache_dir }}/{{ pve_image_file }}"
+    checksum: "sha256:{{ pve_image_base_url }}/SHA256SUMS"
+    mode: "0644"
+
+- name: Create template VM with the image imported as its boot disk
+  ansible.builtin.command:
+    argv:
+      - qm
+      - create
+      - "{{ pve_template_vmid }}"
+      - --name
+      - "{{ pve_template_name }}"
+      - --ostype
+      - l26
+      - --machine
+      - q35
+      - --bios
+      - ovmf
+      - --cpu
+      - host
+      - --cores
+      - "2"
+      - --memory
+      - "2048"
+      - --scsihw
+      - virtio-scsi-single
+      - --scsi0
+      - "{{ pve_storage }}:0,import-from={{ pve_image_cache_dir }}/{{ pve_image_file }},iothread=1,discard=on,ssd=1"
+      - --ide2
+      - "{{ pve_storage }}:cloudinit"
+      - --boot
+      - order=scsi0
+      - --serial0
+      - socket
+      - --vga
+      - serial0
+      - --net0
+      - "virtio,bridge={{ pve_bridge }}"
+      - --agent
+      - enabled=1,fstrim_cloned_disks=1
+  changed_when: true
+
+- name: Convert to template
+  ansible.builtin.command: qm template {{ pve_template_vmid }}
+  changed_when: true

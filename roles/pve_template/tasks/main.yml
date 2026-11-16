@@ -1,0 +1,40 @@
+---
+# glibc's dynamic loader reports which x86-64 micro-architecture levels the
+# running CPU supports, which is the authoritative check for the amd64v3
+# userspace (and Funcom's AVX2 requirement, which v3 includes).
+- name: Ask the dynamic loader which x86-64 levels this CPU supports
+  ansible.builtin.command: /lib64/ld-linux-x86-64.so.2 --help
+  register: pve_ldso
+  changed_when: false
+
+- name: Require x86-64-v3 on the Proxmox host
+  ansible.builtin.assert:
+    that: pve_ldso.stdout is search('x86-64-v3 \(supported')
+    fail_msg: >-
+      This host CPU does not support x86-64-v3 (AVX2, BMI2, FMA, ...). The
+      amd64v3 image will not boot and the Dune server itself needs AVX2.
+    quiet: true
+
+- name: Read template VMID configuration
+  ansible.builtin.command: qm config {{ pve_template_vmid }}
+  register: pve_template_cfg
+  changed_when: false
+  failed_when: false
+
+- name: Validate the existing template
+  when: pve_template_cfg.rc == 0
+  ansible.builtin.assert:
+    that: pve_template_cfg.stdout is search('(?m)^template:\s*1')
+    fail_msg: "VMID {{ pve_template_vmid }} exists but is not a template."
+    quiet: true
+
+- name: Refuse to continue without a template
+  when: pve_template_cfg.rc != 0 and not (pve_template_build | bool)
+  ansible.builtin.fail:
+    msg: >-
+      Template VMID {{ pve_template_vmid }} does not exist and
+      pve_template_build is false.
+
+- name: Build the template
+  when: pve_template_cfg.rc != 0 and (pve_template_build | bool)
+  ansible.builtin.include_tasks: build.yml

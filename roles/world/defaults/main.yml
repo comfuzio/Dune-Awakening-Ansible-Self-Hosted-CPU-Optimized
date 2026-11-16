@@ -1,0 +1,36 @@
+---
+dune_payload_dir: /home/dune/.dune/download
+dune_registry: registry.funcom.com/funcom/self-hosting
+
+dune_world_name: My Arrakis
+# asia | europe | north-america | oceania | south-america (or 1-5)
+dune_world_region: europe
+dune_world_regions:
+  asia: 1
+  europe: 2
+  north-america: 3
+  oceania: 4
+  south-america: 5
+
+# Player-facing address; empty = detect the VM's public IPv4.
+dune_public_ip: ""
+dune_ip_lookup_urls:
+  - https://api.ipify.org
+  - https://ipv4.icanhazip.com
+  - https://checkip.amazonaws.com
+
+# Distinguishes this host to Funcom's backend; defaults to the VM name.
+dune_host_datacenter_id: "{{ vm_name | default(inventory_hostname) }}"
+
+# Only needed if several worlds exist on one node.
+dune_world_namespace: ""
+
+# Read from the environment so it never lands in a file or the shell history.
+dune_selfhost_token: "{{ lookup('ansible.builtin.env', 'DUNE_SELFHOST_TOKEN') }}"
+
+# Run 'battlegroup.sh update-from-downloads' on an existing world when the
+# payload changed during this run (or always, if set to true).
+dune_apply_updates: auto
+
+dune_wait_timeout: 1200
+dune_wait_min_servers: 2

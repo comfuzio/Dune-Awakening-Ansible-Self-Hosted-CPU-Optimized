@@ -1,0 +1,54 @@
+---
+dune_payload_dir: /home/dune/.dune/download
+funcom_namespace: funcom-operators
+funcom_registry: registry.funcom.com/funcom/self-hosting
+
+# Used only if the version cannot be read from the payload's own
+# cert-manager image archive.
+funcom_cert_manager_fallback: v1.8.0
+funcom_cert_manager_manifest: https://github.com/cert-manager/cert-manager/releases/download/{{ funcom_cert_manager_version }}/cert-manager.yaml
+
+# Operator log level. 'info' keeps the controllers quieter (and cheaper) than
+# 'debug'; switch to debug when troubleshooting.
+funcom_log_level: info
+
+# Funcom's Kubernetes operators. On Funcom's own VM image these are pre-
+# installed; on a plain k3s node this role deploys them. 'kind' builds the
+# object names (<kind>operator-controller-manager etc.), which Funcom's
+# battlegroup tooling expects. 'flags' are passed through unchanged.
+funcom_operators:
+  - kind: battlegroup
+    image: igw-k8s-battlegroup-operator
+    flags:
+      - --database-default-port=15432
+      - --filebrowser-default-port=18888
+      - --pghero-default-port=21111
+      - --bg-max-concurrent=2
+      - --dr-max-concurrent=2
+      - --sr-max-concurrent=2
+      - --cfo-taints-ignore=node.kubernetes.io/unschedulable,node.funcom.com/new
+  - kind: database
+    image: igw-k8s-database-operator
+    flags:
+      - --db-max-concurrent=2
+      - --dbdepl-max-concurrent=2
+      - --dbutil-max-concurrent=2
+      - --dbop-max-concurrent=2
+      - --dbb-max-concurrent=2
+      - --dbbs-max-concurrent=2
+      - --dbr-max-concurrent=2
+      - --dbm-max-concurrent=2
+      - --dbutil-supports-prometheus=false
+  - kind: server
+    image: igw-k8s-server-operator
+    flags:
+      - --sg-max-concurrent=2
+      - --ss-max-concurrent=2
+  - kind: utilities
+    image: igw-k8s-utilities-operator
+    flags:
+      - --sgw-max-concurrent=2
+      - --bgd-max-concurrent=2
+      - --fb-max-concurrent=1
+      - --mq-max-concurrent=2
+      - --tr-max-concurrent=2

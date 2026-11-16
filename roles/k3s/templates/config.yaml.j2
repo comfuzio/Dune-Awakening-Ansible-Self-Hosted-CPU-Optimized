@@ -1,0 +1,11 @@
+# Managed by Ansible (roles/k3s). Read by k3s at every start.
+{{ ({
+  'write-kubeconfig-mode': '0644',
+  'disable': ['traefik'],
+  'resolv-conf': '/etc/rancher/k3s/resolv.conf',
+  'node-label': ['node.funcom.com/workload=infrastructure'],
+  'kubelet-arg': [
+    'image-gc-high-threshold=' ~ k3s_image_gc_high,
+    'image-gc-low-threshold=' ~ k3s_image_gc_low,
+  ],
+} | combine(k3s_extra_config)) | to_nice_yaml(indent=2) }}

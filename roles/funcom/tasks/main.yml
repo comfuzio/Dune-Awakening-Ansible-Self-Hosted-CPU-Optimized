@@ -1,0 +1,120 @@
+---
+- name: Install the image helper
+  ansible.builtin.copy:
+    src: dune-images
+    dest: /usr/local/bin/dune-images
+    mode: "0755"
+
+- name: Import prerequisite and operator images from the payload
+  ansible.builtin.command:
+    argv:
+      - dune-images
+      - import
+      - "{{ dune_payload_dir }}/images/prerequisites"
+      - "{{ dune_payload_dir }}/images/operators"
+  register: funcom_import
+  changed_when: "'CHANGED' in funcom_import.stdout"
+
+# The payload ships cert-manager images for one specific release; deploy the
+# manifest of that same release so nothing has to be pulled.
+- name: Read the cert-manager release bundled with the payload
+  ansible.builtin.command:
+    argv: [dune-images, refs, "{{ dune_payload_dir }}/images/prerequisites/cert-manager-controller.tar"]
+  register: funcom_cm_refs
+  changed_when: false
+  failed_when: false
+
+- name: Choose the cert-manager release
+  ansible.builtin.set_fact:
+    funcom_cert_manager_version: >-
+      {{ (funcom_cm_refs.stdout_lines | select('search', ':v[0-9]') | list | first | default(':' ~ funcom_cert_manager_fallback)).split(':')[-1] }}
+
+- name: Read the deployed cert-manager image
+  ansible.builtin.command: >-
+    kubectl -n cert-manager get deployment cert-manager -o jsonpath={.spec.template.spec.containers[0].image}
+  register: funcom_cm_current
+  changed_when: false
+  failed_when: false
+
+# Re-applying the upstream manifest always reports 'configured' (its webhooks
+# inject CA data), so only apply when missing or a different release.
+- name: Deploy cert-manager {{ funcom_cert_manager_version }}
+  when: not funcom_cm_current.stdout.endswith(':' ~ funcom_cert_manager_version)
+  ansible.builtin.command: kubectl apply -f {{ funcom_cert_manager_manifest }}
+  register: funcom_cm_apply
+  until: funcom_cm_apply.rc == 0
+  retries: 5
+  delay: 10
+  changed_when: funcom_cm_apply.stdout is search(' (created|configured)')
+
+- name: Wait for cert-manager
+  ansible.builtin.command: >-
+    kubectl -n cert-manager wait --for=condition=Available --timeout=300s
+    deployment/cert-manager deployment/cert-manager-cainjector deployment/cert-manager-webhook
+  changed_when: false
+
+- name: Create the operator namespace
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    kubectl create namespace {{ funcom_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+  args:
+    executable: /bin/bash
+  register: funcom_ns
+  changed_when: "'created' in funcom_ns.stdout"
+
+# Funcom schedules its workloads onto nodes carrying this label.
+- name: Label the node for Funcom workloads
+  ansible.builtin.command: >-
+    kubectl label node --all node.funcom.com/workload=infrastructure --overwrite
+  register: funcom_label
+  changed_when: funcom_label.stdout is search('^node/[^ ]+ labeled$', multiline=true)
+
+- name: Install Funcom CRDs and cluster roles from the payload
+  ansible.builtin.command: >-
+    kubectl apply --server-side --force-conflicts -f {{ dune_payload_dir }}/images/operators/crds/
+  register: funcom_crds
+  changed_when: funcom_crds.stdout is search('serverside-applied') and funcom_crds.stdout is search('created|configured')
+
+- name: Read the operator release
+  ansible.builtin.slurp:
+    src: "{{ dune_payload_dir }}/images/operators/version.txt"
+  register: funcom_opver
+
+- name: Set the operator image tag
+  ansible.builtin.set_fact:
+    funcom_operator_version: "{{ funcom_opver.content | b64decode | trim }}"
+
+- name: Create /etc/dune
+  ansible.builtin.file:
+    path: /etc/dune
+    state: directory
+    mode: "0755"
+
+- name: Render operator manifests
+  ansible.builtin.template:
+    src: operators.yaml.j2
+    dest: /etc/dune/operators.yaml
+    mode: "0644"
+
+# cert-manager's webhook can take a few seconds after 'Available' to admit
+# Issuer/Certificate objects, hence the retries.
+- name: Apply operator manifests
+  ansible.builtin.command: kubectl apply -f /etc/dune/operators.yaml
+  register: funcom_ops
+  until: funcom_ops.rc == 0
+  retries: 12
+  delay: 10
+  changed_when: funcom_ops.stdout is search(' (created|configured)')
+
+- name: Wait for the webhook certificates
+  ansible.builtin.command: >-
+    kubectl -n {{ funcom_namespace }} wait --for=condition=Ready certificate --all --timeout=300s
+  changed_when: false
+
+- name: Wait for the operators
+  ansible.builtin.command: >-
+    kubectl -n {{ funcom_namespace }} rollout status deployment/{{ item.kind }}operator-controller-manager --timeout=300s
+  loop: "{{ funcom_operators }}"
+  loop_control:
+    label: "{{ item.kind }}"
+  changed_when: false

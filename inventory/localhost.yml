@@ -1,0 +1,7 @@
+# The Proxmox node and the Dune VM are added at run time from your config
+# file (config/local.yml), so the only static host is the controller itself.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"

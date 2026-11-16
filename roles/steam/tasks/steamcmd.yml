@@ -1,0 +1,82 @@
+---
+- name: Create SteamCMD directory
+  ansible.builtin.file:
+    path: "{{ steamcmd_dir }}"
+    state: directory
+    owner: dune
+    group: dune
+    mode: "0755"
+
+- name: Install SteamCMD
+  become: true
+  become_user: dune
+  ansible.builtin.unarchive:
+    src: "{{ steamcmd_url }}"
+    dest: "{{ steamcmd_dir }}"
+    remote_src: true
+    creates: "{{ steamcmd_dir }}/steamcmd.sh"
+
+# The Steam client libraries look for ~/.steam/{root,steam}.
+- name: Create ~/.steam
+  ansible.builtin.file:
+    path: /home/dune/.steam
+    state: directory
+    owner: dune
+    group: dune
+    mode: "0755"
+
+- name: Point ~/.steam at the SteamCMD install
+  ansible.builtin.file:
+    src: "{{ steamcmd_dir }}"
+    dest: /home/dune/.steam/{{ item }}
+    state: link
+    owner: dune
+    group: dune
+    force: true
+  loop: [root, steam]
+
+# battlegroup.sh 'update' calls a plain 'steamcmd' command.
+- name: Provide a steamcmd command on PATH
+  ansible.builtin.copy:
+    dest: /usr/local/bin/steamcmd
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      exec {{ steamcmd_dir }}/steamcmd.sh "$@"
+
+# SteamCMD updates itself on first launch and often exits non-zero once.
+- name: Let SteamCMD self-update
+  become: true
+  become_user: dune
+  ansible.builtin.command: "{{ steamcmd_dir }}/steamcmd.sh +quit"
+  register: steam_selfupdate
+  until: steam_selfupdate.rc == 0
+  retries: 3
+  delay: 5
+  changed_when: false
+
+- name: Download or update the Dune server payload (app {{ dune_steam_app_id }})
+  become: true
+  become_user: dune
+  ansible.builtin.command:
+    argv: >-
+      {{
+        [steamcmd_dir ~ '/steamcmd.sh',
+         '+@ShutdownOnFailedCommand', '1', '+@NoPromptForPassword', '1',
+         '+force_install_dir', dune_payload_dir,
+         '+login', 'anonymous',
+         '+app_update', dune_steam_app_id | string]
+        + ((steam_validate | bool) | ternary(['validate'], []))
+        + ['+quit']
+      }}
+  environment:
+    HOME: /home/dune
+  register: steam_app
+  until: steam_app.rc == 0
+  retries: 4
+  delay: 20
+  changed_when: steam_app.stdout is search('Success! App') and steam_app.stdout is not search('already up to date')
+
+- name: Note whether the payload changed
+  ansible.builtin.set_fact:
+    steam_payload_changed: "{{ steam_app is changed }}"

@@ -1,0 +1,83 @@
+---
+- name: Decide whether to apply the downloaded build
+  ansible.builtin.set_fact:
+    world_apply_build: >-
+      {{ (world_created | default(false) | bool)
+         or (dune_apply_updates | string | lower == 'true')
+         or (dune_apply_updates | string == 'auto' and (steam_payload_changed | default(false) | bool)) }}
+
+- name: Wait for the BattleGroup resource
+  ansible.builtin.command: kubectl -n {{ world_ns }} get battlegroup {{ world_bg }} -o name
+  register: world_cr
+  until: world_cr.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+- name: Align world with this host
+  ansible.builtin.include_tasks: align.yml
+
+- name: Apply the downloaded build and default user settings
+  when: world_apply_build | bool
+  become: true
+  become_user: dune
+  ansible.builtin.command:
+    cmd: ./battlegroup.sh {{ item }}
+    chdir: "{{ dune_payload_dir }}/scripts"
+  environment:
+    HOME: /home/dune
+  loop:
+    - update-from-downloads
+    - apply-default-usersettings
+  changed_when: true
+
+# update-from-downloads re-applies Funcom's generated manifests.
+- name: Align world again after the update
+  when: world_apply_build | bool
+  ansible.builtin.include_tasks: align.yml
+
+- name: Link Funcom's admin tools into ~/.dune/bin
+  ansible.builtin.file:
+    src: "{{ dune_payload_dir }}/scripts/{{ item.src }}"
+    dest: /home/dune/.dune/bin/{{ item.dest }}
+    state: link
+    force: true
+    follow: false
+    owner: dune
+    group: dune
+  loop:
+    - {src: battlegroup.sh, dest: battlegroup}
+    - {src: bg-util, dest: bg-util}
+
+- name: Start the battlegroup
+  become: true
+  become_user: dune
+  ansible.builtin.command: /home/dune/.dune/bin/battlegroup start
+  environment:
+    HOME: /home/dune
+  register: world_start
+  changed_when: world_start.stdout is search('starting', ignorecase=true)
+
+- name: Wait until the world is healthy and servers are up
+  ansible.builtin.command: >-
+    dune-world wait --ns {{ world_ns }}
+    --timeout {{ dune_wait_timeout }} --servers {{ dune_wait_min_servers }}
+  register: world_health
+  changed_when: false
+
+- name: Battlegroup status
+  become: true
+  become_user: dune
+  ansible.builtin.command: /home/dune/.dune/bin/battlegroup status
+  environment:
+    HOME: /home/dune
+  register: world_status
+  changed_when: false
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "World '{{ dune_world_name }}' is up in {{ world_ns }}."
+      - "Players connect to {{ world_ip }}. Forward UDP 7777-7890 and TCP 31982 to {{ vm_address | default('the VM') | regex_replace('/.*$', '') }}."
+      - "Health: {{ world_health.stdout }}"
+      - "{{ world_status.stdout_lines }}"

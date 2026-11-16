@@ -1,0 +1,5 @@
+---
+# Settings are shared across roles (vm_*, dune_*, k3s_*), so role-prefixed
+# variable names would only add noise.
+skip_list:
+  - var-naming[no-role-prefix]

@@ -1,0 +1,4 @@
+config/local.yml
+.venv/
+*.retry
+__pycache__/

@@ -1,0 +1,76 @@
+---
+# Full deployment: Proxmox template -> tuned VM -> Ubuntu 26.04 amd64v3 guest
+# -> Funcom server payload -> k3s -> Funcom operators -> battlegroup world.
+#
+#   ansible-playbook site.yml -e @config/local.yml
+#
+# Every stage is tagged, so a stage can be re-run alone, e.g.
+#   ansible-playbook site.yml -e @config/local.yml --tags k3s
+# Every stage is safe to re-run.
+
+- name: Load deployment targets from config
+  hosts: localhost
+  gather_facts: false
+  tags: always
+  tasks:
+    - name: Check required settings
+      ansible.builtin.assert:
+        that:
+          - pve_host is defined and pve_host | length > 0
+          - vm_address is defined and '/' in vm_address
+          - vm_gateway is defined
+          - vm_ssh_public_key is defined
+          - vm_ssh_private_key is defined
+        fail_msg: >-
+          Missing settings. Copy config/example.yml to config/local.yml, fill it
+          in, and pass it with -e @config/local.yml (scripts/deploy.sh does this).
+
+    - name: Register Proxmox node
+      ansible.builtin.add_host:
+        name: pve
+        groups: proxmox
+        ansible_host: "{{ pve_host }}"
+        ansible_user: "{{ pve_user | default('root') }}"
+        ansible_become: "{{ (pve_user | default('root')) != 'root' }}"
+
+    - name: Register Dune VM
+      ansible.builtin.add_host:
+        name: dune
+        groups: dune_vm
+        ansible_host: "{{ vm_address.split('/')[0] }}"
+        ansible_user: dune
+        ansible_ssh_private_key_file: "{{ vm_ssh_private_key | expanduser }}"
+        ansible_python_interpreter: /usr/bin/python3
+        # A freshly cloned VM has a new host key every time.
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=~/.ssh/known_hosts.dune"
+
+- name: Proxmox template and VM
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - role: pve_template
+      tags: [proxmox, template]
+    - role: pve_vm
+      tags: [proxmox, vm]
+
+- name: Guest operating system
+  hosts: dune_vm
+  gather_facts: false
+  become: true
+  roles:
+    - role: guest
+      tags: [guest]
+
+- name: Dune server stack
+  hosts: dune_vm
+  gather_facts: true
+  become: true
+  roles:
+    - role: steam
+      tags: [payload]
+    - role: k3s
+      tags: [k3s]
+    - role: funcom
+      tags: [operators]
+    - role: world
+      tags: [world]

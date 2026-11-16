@@ -1,0 +1,70 @@
+---
+- name: Require the self-host token for a new world
+  ansible.builtin.assert:
+    that: dune_selfhost_token.split('.') | length == 3
+    fail_msg: Set DUNE_SELFHOST_TOKEN (scripts/deploy.sh asks for it).
+    quiet: true
+
+# Fixing Funcom's template first means world.sh generates a world that
+# already advertises the right address and uses the default scheduler,
+# instead of patching it after the fact.
+- name: Prepare Funcom's world template for this host
+  become: true
+  become_user: dune
+  ansible.builtin.command:
+    argv:
+      - dune-world
+      - files
+      - --ip
+      - "{{ world_ip }}"
+      - --host-id
+      - "{{ dune_host_datacenter_id }}"
+      - --drop-scheduler
+      - "{{ dune_payload_dir }}/scripts/setup/templates/world-template.yaml"
+  register: world_template
+  changed_when: "'CHANGED' in world_template.stdout"
+
+- name: Import battlegroup images from the payload
+  ansible.builtin.command:
+    argv: [dune-images, import, "{{ dune_payload_dir }}/images/battlegroup"]
+  register: world_images
+  changed_when: "'CHANGED' in world_images.stdout"
+
+- name: Read the battlegroup build
+  ansible.builtin.slurp:
+    src: "{{ dune_payload_dir }}/images/battlegroup/version.txt"
+  register: world_build
+
+# world.sh deploys images tagged 0-0-shipping, while the payload's images
+# carry the build number; alias them so the first start does not stall in
+# ImagePullBackOff.
+- name: Alias the build's images to the tag world.sh deploys
+  ansible.builtin.command:
+    argv:
+      - dune-images
+      - retag
+      - "{{ dune_registry }}/seabass-"
+      - "{{ world_build.content | b64decode | trim }}"
+      - 0-0-shipping
+  register: world_retag
+  changed_when: "'CHANGED' in world_retag.stdout"
+
+# Prompts, in order: world name, region number, self-host token.
+- name: Run Funcom's world.sh
+  become: true
+  become_user: dune
+  ansible.builtin.command:
+    cmd: bash ./setup/world.sh
+    chdir: "{{ dune_payload_dir }}/scripts"
+    stdin: |
+      {{ dune_world_name }}
+      {{ world_region_number }}
+      {{ dune_selfhost_token }}
+  environment:
+    HOME: /home/dune
+  no_log: true
+  changed_when: true
+
+- name: Mark the world as newly created
+  ansible.builtin.set_fact:
+    world_created: true

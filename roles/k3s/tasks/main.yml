@@ -1,0 +1,137 @@
+---
+- name: Check for an existing k3s install
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_binary
+
+- name: Remember whether k3s was already installed
+  ansible.builtin.set_fact:
+    k3s_preinstalled: "{{ k3s_binary.stat.exists }}"
+
+# Everything k3s reads at start-up is written before the first start, so a
+# fresh install never runs with defaults.
+- name: Create k3s configuration directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /etc/rancher/k3s
+    - /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d
+
+- name: Write k3s configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    # 0644: k3s's kubectl reads this file for every user (Funcom's scripts
+    # run kubectl as 'dune'); it holds no secrets.
+    mode: "0644"
+  notify: Restart k3s
+
+- name: Write pod resolv.conf
+  ansible.builtin.copy:
+    dest: /etc/rancher/k3s/resolv.conf
+    mode: "0644"
+    content: |
+      # Managed by Ansible (roles/k3s). Upstream DNS for CoreDNS and pods.
+      {% for ns in k3s_pod_nameservers %}
+      nameserver {{ ns }}
+      {% endfor %}
+  notify: Restart k3s
+
+# Drop-ins in config-v3.toml.d need a k3s release with containerd 2.x.
+- name: Run containers without an AppArmor profile (kernel >= 7.0.0-42 signal denials)
+  ansible.builtin.copy:
+    dest: /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/10-dune-no-apparmor.toml
+    mode: "0644"
+    content: |
+      # Managed by Ansible (roles/k3s).
+      # Kernels >= 7.0.0-42 label peers "cri-containerd.apparmor.d//&unconfined",
+      # which the default profile won't signal (breaks postgres USR1 / Go URG).
+      version = 3
+      [plugins.'io.containerd.cri.v1.runtime']
+        disable_apparmor = true
+  when: k3s_disable_apparmor | bool
+  notify: Restart k3s
+
+- name: Drop the AppArmor override when disabled
+  ansible.builtin.file:
+    path: /var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d/10-dune-no-apparmor.toml
+    state: absent
+  when: not (k3s_disable_apparmor | bool)
+  notify: Restart k3s
+
+- name: Apply pending k3s restarts
+  ansible.builtin.meta: flush_handlers
+
+- name: Download the k3s installer
+  ansible.builtin.get_url:
+    url: "{{ k3s_installer_url }}"
+    dest: /usr/local/sbin/k3s-install.sh
+    mode: "0755"
+
+- name: Read the installed k3s version
+  when: k3s_preinstalled | bool
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_current
+  changed_when: false
+
+# Installs on first run; afterwards only re-runs when a pinned version differs.
+- name: Install k3s
+  when: >-
+    not (k3s_preinstalled | bool) or
+    (k3s_version | length > 0 and k3s_version not in k3s_current.stdout)
+  ansible.builtin.command: /usr/local/sbin/k3s-install.sh
+  environment: >-
+    {{ (k3s_version | length > 0)
+       | ternary({'INSTALL_K3S_VERSION': k3s_version}, {'INSTALL_K3S_CHANNEL': k3s_channel}) }}
+  changed_when: true
+
+- name: Make sure k3s is enabled and running
+  ansible.builtin.systemd_service:
+    name: k3s
+    enabled: true
+    state: started
+
+- name: Wait for the node to register
+  ansible.builtin.command: kubectl get nodes -o name
+  register: k3s_nodes
+  until: k3s_nodes.rc == 0 and k3s_nodes.stdout | length > 0
+  retries: 40
+  delay: 5
+  changed_when: false
+
+- name: Wait for the node to be Ready
+  ansible.builtin.command: kubectl wait --for=condition=Ready node --all --timeout=300s
+  changed_when: false
+
+- name: Wait for containerd to accept commands
+  ansible.builtin.command: k3s ctr version
+  register: k3s_ctr
+  until: k3s_ctr.rc == 0
+  retries: 30
+  delay: 5
+  changed_when: false
+
+# Only k3s releases whose containerd config imports config-v3.toml.d/ honour
+# the drop-in (older ones, e.g. v1.33, generate a config.toml without the
+# import). Check what containerd actually runs with instead of assuming.
+- name: Verify containerd runs containers without AppArmor
+  when: k3s_disable_apparmor | bool
+  ansible.builtin.include_tasks: apparmor_verify.yml
+
+- name: Look for AppArmor signal denials from containers
+  ansible.builtin.shell: >-
+    set -o pipefail;
+    journalctl -k -b --no-pager | grep -c 'apparmor="DENIED".*cri-containerd' || true
+  args:
+    executable: /bin/bash
+  register: k3s_aa_denials
+  changed_when: false
+
+- name: Warn about AppArmor denials
+  when: k3s_aa_denials.stdout | int > 0 and not (k3s_disable_apparmor | bool)
+  ansible.builtin.debug:
+    msg: >-
+      The kernel blocked {{ k3s_aa_denials.stdout }} container signals this boot.
+      Set k3s_disable_apparmor: true if postgres or Go services misbehave.

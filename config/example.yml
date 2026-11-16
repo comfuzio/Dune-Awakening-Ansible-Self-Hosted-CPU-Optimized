@@ -1,0 +1,51 @@
+# Copy to config/local.yml (git-ignored) and edit, or let scripts/deploy.sh
+# write it for you. Anything not set here falls back to the role defaults in
+# roles/*/defaults/main.yml.
+#
+# The Funcom self-host token is NOT stored here. scripts/deploy.sh asks for it
+# and passes it in the DUNE_SELFHOST_TOKEN environment variable.
+
+# --- Proxmox node --------------------------------------------------------
+pve_host: 192.168.1.10
+pve_user: root
+pve_storage: local-lvm
+pve_bridge: vmbr0
+
+# Existing Ubuntu 26.04 amd64v3 cloud-init template to clone from. If this
+# VMID does not exist and pve_template_build is true, it is built from
+# Canonical's image (checksum-verified).
+pve_template_vmid: 8010
+pve_template_build: true
+
+# --- Dune VM ---------------------------------------------------------------
+vm_id: 201
+vm_name: dune-server
+vm_cores: 6
+vm_memory_gib: 40
+vm_disk_gib: 110
+vm_address: 192.168.1.200/24
+vm_gateway: 192.168.1.1
+vm_dns: [1.1.1.1, 1.0.0.1]
+vm_ssh_public_key: ~/.ssh/dune_ed25519.pub
+vm_ssh_private_key: ~/.ssh/dune_ed25519
+
+# Optional performance knobs (see README, "Performance"):
+# vm_hugepages: "1024"      # back guest RAM with 1 GiB host hugepages
+# vm_cpu_affinity: "2-7"    # pin the VM to these host cores
+# vm_numa: true
+
+# --- Game ----------------------------------------------------------------
+dune_world_name: My Arrakis
+# asia | europe | north-america | oceania | south-america
+dune_world_region: europe
+# Address players connect to. Leave empty to detect the public IPv4 from the
+# VM. For a LAN-only server use the VM's LAN address.
+dune_public_ip: ""
+
+# Server payload source: SteamCMD (default) or a Linux package archive.
+dune_steam_app_id: "4754530"
+# dune_payload_archive: /path/or/https/url/to/linux-package.tar.gz
+
+# --- k3s -----------------------------------------------------------------
+k3s_channel: stable
+# k3s_version: "vX.Y.Z+k3s1"   # pin an exact release instead of the channel

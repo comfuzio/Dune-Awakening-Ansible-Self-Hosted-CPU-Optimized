@@ -1,0 +1,53 @@
+---
+# Bring files and live objects in line with this host. Safe to repeat.
+- name: Align the generated world manifest
+  become: true
+  become_user: dune
+  ansible.builtin.command:
+    argv:
+      - dune-world
+      - files
+      - --ip
+      - "{{ world_ip }}"
+      - --host-id
+      - "{{ dune_host_datacenter_id }}"
+      - --drop-scheduler
+      - /home/dune/.dune/{{ world_bg }}.yaml
+  register: world_files
+  changed_when: "'CHANGED' in world_files.stdout"
+
+- name: Record the player-facing address in settings.conf
+  become: true
+  become_user: dune
+  ansible.builtin.command:
+    argv: [dune-world, settings, --ip, "{{ world_ip }}"]
+  environment:
+    HOME: /home/dune
+  register: world_settings
+  changed_when: "'CHANGED' in world_settings.stdout"
+
+- name: Align the live BattleGroup resource
+  ansible.builtin.command:
+    argv:
+      - dune-world
+      - cr
+      - --ns
+      - "{{ world_ns }}"
+      - --ip
+      - "{{ world_ip }}"
+      - --host-id
+      - "{{ dune_host_datacenter_id }}"
+      - --title
+      - "{{ dune_world_name }}"
+  register: world_cr_patch
+  changed_when: "'CHANGED' in world_cr_patch.stdout"
+
+- name: Install the gateway's service key (manifest and live secret)
+  when: dune_selfhost_token | length > 0
+  ansible.builtin.command:
+    argv: [dune-world, fls, --ns, "{{ world_ns }}", "/home/dune/.dune/{{ world_bg }}-fls-secret.yaml"]
+  environment:
+    DUNE_SELFHOST_TOKEN: "{{ dune_selfhost_token }}"
+  register: world_fls
+  changed_when: "'CHANGED' in world_fls.stdout"
+  no_log: true

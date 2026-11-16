@@ -1,0 +1,11 @@
+---
+pve_storage: local-lvm
+pve_bridge: vmbr0
+pve_template_vmid: 8010
+pve_template_build: true
+pve_template_name: ubuntu-2604-amd64v3
+
+# Canonical publishes the amd64v3 variant next to the generic amd64 image.
+pve_image_base_url: https://cloud-images.ubuntu.com/releases/server/26.04/release
+pve_image_file: ubuntu-26.04-server-cloudimg-amd64v3.img
+pve_image_cache_dir: /var/cache/dune-deploy

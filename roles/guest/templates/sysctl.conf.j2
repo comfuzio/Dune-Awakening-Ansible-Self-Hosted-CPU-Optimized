@@ -1,0 +1,4 @@
+# Managed by Ansible (roles/guest). Local changes are overwritten.
+{% for key, value in guest_sysctl | dictsort %}
+{{ key }} = {{ value }}
+{% endfor %}

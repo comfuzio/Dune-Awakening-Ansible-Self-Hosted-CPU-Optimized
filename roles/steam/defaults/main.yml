@@ -1,0 +1,11 @@
+---
+dune_payload_dir: /home/dune/.dune/download
+dune_steam_app_id: "4754530"
+# Optional: local path (on the controller) or http(s) URL of a Linux package
+# archive. When set, SteamCMD is not used.
+dune_payload_archive: ""
+
+steamcmd_dir: /home/dune/steamcmd
+steamcmd_url: https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+# 'validate' re-hashes every file; slower, but catches interrupted downloads.
+steam_validate: true
